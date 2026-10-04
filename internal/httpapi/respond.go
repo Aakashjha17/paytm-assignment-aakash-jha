@@ -13,8 +13,9 @@ type errorBody struct {
 }
 
 type errorDetail struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string   `json:"code"`
+	Message string   `json:"message"`
+	Details []string `json:"details,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -26,12 +27,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError sends the uniform error envelope. code is a stable,
 // machine-readable reason; message is for humans.
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
-	st := stateFrom(r.Context())
-	if st != nil {
+	writeErrorDetails(w, r, status, code, message, nil)
+}
+
+// writeErrorDetails is writeError plus specifics, e.g. which seats were taken.
+func writeErrorDetails(w http.ResponseWriter, r *http.Request, status int, code, message string, details []string) {
+	if st := stateFrom(r.Context()); st != nil {
 		st.errCode = code
 	}
 	writeJSON(w, status, errorBody{
-		Error:     errorDetail{Code: code, Message: message},
+		Error:     errorDetail{Code: code, Message: message, Details: details},
 		RequestID: requestIDFrom(r.Context()),
 	})
 }

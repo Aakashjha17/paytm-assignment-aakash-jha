@@ -27,6 +27,7 @@ var incomingIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 type requestState struct {
 	id      string
 	user    string
+	outcome string // booking outcome, for reserve/cancel
 	errCode string
 	err     error
 	panic   any
@@ -92,6 +93,9 @@ func accessLog(log *slog.Logger) func(http.Handler) http.Handler {
 			}
 			if st.user != "" {
 				attrs = append(attrs, slog.String("user_id", st.user))
+			}
+			if st.outcome != "" {
+				attrs = append(attrs, slog.String("outcome", st.outcome))
 			}
 			if st.errCode != "" {
 				attrs = append(attrs, slog.String("error_code", st.errCode))

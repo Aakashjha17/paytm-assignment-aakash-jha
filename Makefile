@@ -1,4 +1,4 @@
-.PHONY: up down run build
+.PHONY: up down run build test test-integration test-race
 
 up:
 	docker compose up -d --build
@@ -14,3 +14,17 @@ run:
 
 build:
 	go build -o bin/server ./cmd/server
+
+# Unit tests: no database needed.
+test:
+	go test ./...
+
+# Concurrency/integration suite against the compose Postgres (fresh DB per run).
+test-integration:
+	docker compose up -d --wait db
+	go test -race -tags integration -count=1 ./test/integration/
+
+# The bar for Phase 3: green under the race detector across many repeats.
+test-race:
+	docker compose up -d --wait db
+	go test -race -tags integration -count=20 ./test/integration/

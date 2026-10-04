@@ -30,6 +30,8 @@ func (a *API) Handler(log *slog.Logger) http.Handler {
 	api.HandleFunc("POST /tokens", a.mintToken)
 	api.HandleFunc("POST /shows", a.requireAdmin(a.createShow))
 	api.HandleFunc("GET /shows/{id}", a.getShow)
+	api.HandleFunc("POST /shows/{id}/reservations", a.requireUser(a.reserve))
+	api.HandleFunc("DELETE /reservations/{id}", a.requireUser(a.cancel))
 	mux.Handle("/", requireReady(a.ready, api))
 
 	var h http.Handler = mux
