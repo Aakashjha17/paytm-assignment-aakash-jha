@@ -1,4 +1,4 @@
-.PHONY: up down run build test test-integration test-race
+.PHONY: up down run build test test-integration test-race burst watch
 
 up:
 	docker compose up -d --build
@@ -28,3 +28,15 @@ test-integration:
 test-race:
 	docker compose up -d --wait db
 	go test -race -tags integration -count=20 ./test/integration/
+
+# On-sale stampede + reconciliation. BASE_URL defaults to local compose.
+#   make burst
+#   make burst BASE_URL=https://<app>.up.railway.app ADMIN_API_KEY=<live key>
+BASE_URL ?= http://localhost:8080
+burst:
+	./burst.sh $(BASE_URL) $(BURST_FLAGS)
+
+# Live view of the key metrics, refreshed every second (for screen recording
+# alongside the logs during a burst).  make watch BASE_URL=https://...
+watch:
+	@while true; do clear; date; curl -s $(BASE_URL)/metrics | grep -E '^(reservations_|reservation_cancellations|seats_(available|held|confirmed|total)|audit_mismatches|db_tx_retries|db_pool_(acquired|max|empty)|http_requests_in_flight|app_ready)'; sleep 1; done
