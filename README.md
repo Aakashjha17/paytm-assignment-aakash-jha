@@ -63,7 +63,7 @@ The compose Postgres is published on host port **55432** (so it doesn't clash wi
 
 Railway builds from the `Dockerfile` (see `railway.json`) and runs one replica, with Postgres in the same region.
 
-Live URL: _TBD_
+Live URL: **https://paytm-assignment-aakash-jha-production.up.railway.app** — try `/readyz`, `/metrics`, `/shows/1`.
 
 ## Burst test (one command)
 
@@ -136,6 +136,54 @@ checks:
 RESULT: PASS
 ```
 
-### Live run
+### A passing live run (Railway, from a laptop over the internet)
 
-_TODO: paste a passing run against the Railway URL._
+Two consecutive full runs passed with zero 5xx (plus an earlier one); this is the first of the pair:
+
+```
+== burst against https://paytm-assignment-aakash-jha-production.up.railway.app — show 4 (5000 seats, limit 4), run 234c02a4, seed 1367862844162751400
+20000 reserve + 414 cancel requests in 20.661s (988 req/s), concurrency 1000
+latency: p50 931ms  p95 1.554s  p99 1.96s  max 2.953s
+
+outcomes (reserve), by what the client received:
+  confirmed                       3072
+  idempotency-key-reused           188
+  idempotent-replay                  3
+  per-user-limit                   963
+  seat-taken                     15774
+  5xx                                0
+
+by workload kind:
+  cold       confirmed=2041  per-user-limit=625  seat-taken=4734
+  conflict   confirmed=246  idempotency-key-reused=188  seat-taken=366
+  greedy     confirmed=382  per-user-limit=338  seat-taken=280
+  hot        confirmed=3  idempotent-replay=2  seat-taken=7995
+  hot-retry  confirmed=2  idempotent-replay=1  seat-taken=1997
+  spoof      confirmed=398  seat-taken=402
+
+hot seats (201s / requests):
+  A1    1 / 2003
+  A2    1 / 1990
+  A3    1 / 1995
+  A4    1 / 1990
+  A5    1 / 2022
+
+checks:
+  PASS  zero 5xx                                     0
+  PASS  zero transport errors / timeouts             0
+  PASS  each hot seat: exactly one 201, rest 409     5 seats 
+  PASS  same key → one reservation                   3072 keys with 2xx, 0 violating
+  PASS  per-user limit holds                         0 users over 4
+  PASS  identity comes from the token                0 responses for the wrong user
+  PASS  during burst: invariant held on every poll   8 /shows polls, 8 /metrics polls, 0 poll errors all match
+  PASS  final: available + held + confirmed == total 1223 + 3777 + 0 = 5000 of 5000
+  PASS  final: held == client wins − cancels         API held 3777, clients hold 3777
+  PASS  metrics: seat gauges == API                  gauges 1223/3777/0 of 5000, API 1223/3777/0
+  PASS  metrics: outcome counters == client tally    all match
+  PASS  metrics: no deadlock/serialization retries   +0
+  PASS  audit after burst: zero mismatches           audit_mismatches total 0
+
+RESULT: PASS
+```
+
+Where the time goes (from live `/metrics` after a run): server-side mean ≈ 0.62 s per reserve, of which ≈ 0.60 s is waiting for one of the 20 pooled DB connections (`db_pool_empty_acquires_total` ≈ every acquire). Each decision holds a connection ≈ 20 ms including the app↔Postgres round trip, so the pool caps throughput at ≈ 1,000 req/s and excess concurrency queues — safely, since waiting never changes an outcome. Raising `DB_MAX_CONNS` (Railway Postgres allows ~100) is the first lever if latency matters.
