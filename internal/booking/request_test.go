@@ -101,6 +101,10 @@ func TestOutcomeTableComplete(t *testing.T) {
 		if s.Reason == "" {
 			t.Errorf("%s: no metric reason", o)
 		}
+		// A client seeing error.code must be able to find its metric series.
+		if !s.OK && s.Reason != strings.ReplaceAll(s.Code, "_", "-") {
+			t.Errorf("%s: metric reason %q doesn't match error code %q", o, s.Reason, s.Code)
+		}
 	}
 	if len(outcomes) != len(AllOutcomes) {
 		t.Errorf("table has %d entries, AllOutcomes has %d", len(outcomes), len(AllOutcomes))
