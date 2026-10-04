@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +33,7 @@ import (
 
 	"seat-reservation/internal/auth"
 	"seat-reservation/internal/httpapi"
+	"seat-reservation/internal/metrics"
 	"seat-reservation/internal/store"
 	"seat-reservation/migrations"
 )
@@ -46,6 +49,8 @@ var (
 	client  *http.Client
 	pool    *pgxpool.Pool
 	authn   *auth.Authenticator
+	st      *store.Store
+	mtx     *metrics.Metrics
 )
 
 func TestMain(m *testing.M) { os.Exit(run(m)) }
@@ -93,7 +98,13 @@ func run(m *testing.M) int {
 	}
 
 	authn = auth.New(jwtSecret, adminKey, time.Hour)
-	api := httpapi.New(store.New(pool), authn, func() bool { return true })
+	st = store.New(pool)
+	mtx = metrics.New()
+	mtx.Register(metrics.NewSeatCollector(st), metrics.NewPoolCollector(st))
+	api := httpapi.New(httpapi.Deps{
+		Store: st, Auth: authn, Metrics: mtx,
+		Migrated: func() bool { return true },
+	})
 	srv := httptest.NewServer(api.Handler(quiet))
 	defer srv.Close()
 	baseURL = srv.URL
@@ -105,7 +116,21 @@ func run(m *testing.M) int {
 			IdleConnTimeout:     30 * time.Second,
 		},
 	}
-	return m.Run()
+	code := m.Run()
+
+	// After everything (every storm, cancel and expiry), audit the whole
+	// database. Any mismatch fails the run even if each test passed.
+	res, err := st.Audit(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration: final audit: %v\n", err)
+		return 1
+	}
+	if res.Total() != 0 {
+		fmt.Fprintf(os.Stderr, "integration: final audit found violations: %v %v\n", res.Mismatches, res.Samples)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "integration: final audit clean (%d checks)\n", len(res.Mismatches))
+	return code
 }
 
 // ---- HTTP helpers -------------------------------------------------------
@@ -360,4 +385,34 @@ func noRetries(t *testing.T, fn func()) {
 	if d := store.Retries() - before; d != 0 {
 		t.Errorf("%d transaction(s) retried after deadlock/serialization failure; lock order is broken", d)
 	}
+}
+
+// ---- metrics ------------------------------------------------------------
+
+// scrape fetches /metrics and returns every sample keyed by its full series,
+// e.g. `seats_held{show_id="3"}` or `reservations_confirmed_total`.
+func scrape(t *testing.T) map[string]float64 {
+	t.Helper()
+	res, err := client.Get(baseURL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]float64{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		i := strings.LastIndexByte(line, ' ')
+		v, err := strconv.ParseFloat(line[i+1:], 64)
+		if err != nil {
+			t.Fatalf("bad metrics line %q", line)
+		}
+		out[line[:i]] = v
+	}
+	return out
 }

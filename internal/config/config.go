@@ -10,13 +10,18 @@ import (
 
 // Config is everything the server reads from the environment.
 type Config struct {
-	Port            int
-	DatabaseURL     string
-	DBMaxConns      int32
-	JWTSecret       string
-	AdminAPIKey     string
-	TokenTTL        time.Duration
-	LogLevel        string
+	Port          int
+	DatabaseURL   string
+	DBMaxConns    int32
+	JWTSecret     string
+	AdminAPIKey   string
+	TokenTTL      time.Duration
+	LogLevel      string
+	AuditInterval time.Duration
+	// DrainDelay: after SIGTERM, how long /readyz reports 503 while requests
+	// are still served, so a load balancer stops routing here first.
+	DrainDelay time.Duration
+	// ShutdownTimeout bounds waiting for in-flight requests to finish.
 	ShutdownTimeout time.Duration
 }
 
@@ -30,6 +35,10 @@ func Load() (Config, error) {
 	errs = append(errs, err)
 	shutdown, err := durationEnv("SHUTDOWN_TIMEOUT", 10*time.Second)
 	errs = append(errs, err)
+	audit, err := durationEnv("AUDIT_INTERVAL", 30*time.Second)
+	errs = append(errs, err)
+	drain, err := durationEnv("DRAIN_DELAY", 2*time.Second)
+	errs = append(errs, err)
 
 	cfg := Config{
 		Port:            port,
@@ -39,6 +48,8 @@ func Load() (Config, error) {
 		AdminAPIKey:     os.Getenv("ADMIN_API_KEY"),
 		TokenTTL:        tokenTTL,
 		LogLevel:        os.Getenv("LOG_LEVEL"),
+		AuditInterval:   audit,
+		DrainDelay:      drain,
 		ShutdownTimeout: shutdown,
 	}
 
@@ -52,6 +63,9 @@ func Load() (Config, error) {
 	}
 	if len(cfg.AdminAPIKey) < 16 {
 		errs = append(errs, errors.New("ADMIN_API_KEY must be at least 16 characters"))
+	}
+	if cfg.AuditInterval < time.Second {
+		errs = append(errs, errors.New("AUDIT_INTERVAL must be >= 1s"))
 	}
 	if cfg.DBMaxConns < 1 {
 		errs = append(errs, errors.New("DB_MAX_CONNS must be >= 1"))

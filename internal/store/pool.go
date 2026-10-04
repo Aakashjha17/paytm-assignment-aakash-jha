@@ -55,5 +55,8 @@ func WaitForDB(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) error 
 	}
 }
 
+// PoolStat exposes connection-pool counters for metrics.
+func (s *Store) PoolStat() *pgxpool.Stat { return s.pool.Stat() }
+
 // Ping is the readiness probe's dependency check.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }

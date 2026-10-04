@@ -9,9 +9,13 @@ import (
 	"net/http"
 	"regexp"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"time"
 
 	"seat-reservation/internal/auth"
+	"seat-reservation/internal/booking"
+	"seat-reservation/internal/metrics"
 )
 
 const (
@@ -68,27 +72,32 @@ func newRequestID() string {
 	return hex.EncodeToString(b)
 }
 
-// accessLog writes exactly one log line per request, after it completes.
-// Nothing else in the request path logs; inner layers annotate requestState.
-func accessLog(log *slog.Logger) func(http.Handler) http.Handler {
+// observe writes exactly one log line and records exactly one set of metrics
+// per request, after it completes. Nothing else in the request path logs or
+// counts; inner layers only annotate requestState.
+func observe(log *slog.Logger, m *metrics.Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+			m.RequestStarted()
 			rec := &statusRecorder{ResponseWriter: w}
 			next.ServeHTTP(rec, r)
+			m.RequestFinished()
+			elapsed := time.Since(start)
 
 			st := stateFrom(r.Context())
 			status := rec.status
 			if status == 0 {
 				status = http.StatusOK
 			}
+			recordMetrics(m, r, st, status, elapsed)
 			attrs := []slog.Attr{
 				slog.String("request_id", st.id),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", status),
 				slog.Int("bytes", rec.bytes),
-				slog.Float64("duration_ms", float64(time.Since(start).Microseconds())/1000),
+				slog.Float64("duration_ms", float64(elapsed.Microseconds())/1000),
 				slog.String("remote", r.RemoteAddr),
 			}
 			if st.user != "" {
@@ -107,12 +116,60 @@ func accessLog(log *slog.Logger) func(http.Handler) http.Handler {
 			if st.panic != nil {
 				level = slog.LevelError
 				attrs = append(attrs, slog.String("panic", fmt.Sprint(st.panic)), slog.String("stack", st.stack))
+			} else if status >= 500 && r.URL.Path == "/readyz" {
+				level = slog.LevelWarn // an expected answer while starting or draining
 			} else if status >= 500 {
 				level = slog.LevelError
 			}
 			log.LogAttrs(r.Context(), level, "request", attrs...)
 		})
 	}
+}
+
+var (
+	reservePath = regexp.MustCompile(`^/shows/[^/]+/reservations$`)
+	cancelPath  = regexp.MustCompile(`^/reservations/[^/]+$`)
+)
+
+// recordMetrics is the only place outcome counters are incremented, so every
+// reserve response lands in exactly one of reservations_confirmed_total or
+// reservations_declined_total{reason}, including auth failures, bad input,
+// not-ready and panics, not just the database's decisions.
+func recordMetrics(m *metrics.Metrics, r *http.Request, st *requestState, status int, elapsed time.Duration) {
+	// r.Pattern is set by the inner mux on this same request; it is a
+	// bounded set of route templates, never a raw path.
+	route := r.Pattern
+	if route == "" || route == "/" {
+		route = "unmatched"
+	}
+	m.ObserveHTTP(route, strconv.Itoa(status), elapsed.Seconds())
+
+	switch {
+	case r.Method == http.MethodPost && reservePath.MatchString(r.URL.Path):
+		m.ObserveReserve(reasonFor(st, status))
+	case r.Method == http.MethodDelete && cancelPath.MatchString(r.URL.Path):
+		m.ObserveCancel(reasonFor(st, status))
+	}
+}
+
+// reasonFor prefers the booking outcome's reason; failures that happened
+// before a decision (auth, validation, not ready) use their error code.
+func reasonFor(st *requestState, status int) string {
+	if st.panic != nil {
+		return "internal-error"
+	}
+	if st.outcome != "" {
+		if spec, ok := booking.Outcome(st.outcome).Spec(); ok {
+			return spec.Reason
+		}
+	}
+	if st.errCode != "" {
+		return strings.ReplaceAll(st.errCode, "_", "-")
+	}
+	if status >= 500 {
+		return "internal-error"
+	}
+	return "unknown"
 }
 
 // recoverPanics turns a handler panic into a 500 and records it on the access

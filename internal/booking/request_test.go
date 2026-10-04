@@ -98,6 +98,9 @@ func TestOutcomeTableComplete(t *testing.T) {
 		if !s.OK && (s.Code == "" || s.Message == "") {
 			t.Errorf("%s: a decline needs a code and message", o)
 		}
+		if s.Reason == "" {
+			t.Errorf("%s: no metric reason", o)
+		}
 	}
 	if len(outcomes) != len(AllOutcomes) {
 		t.Errorf("table has %d entries, AllOutcomes has %d", len(outcomes), len(AllOutcomes))

@@ -7,14 +7,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"seat-reservation/internal/audit"
 	"seat-reservation/internal/auth"
 	"seat-reservation/internal/config"
 	"seat-reservation/internal/httpapi"
 	"seat-reservation/internal/logging"
+	"seat-reservation/internal/metrics"
 	"seat-reservation/internal/store"
 	"seat-reservation/migrations"
 )
@@ -27,6 +30,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ctx is cancelled on SIGTERM/SIGINT; background work watches it. Request
+	// contexts are separate, so cancelling it does not abort in-flight requests.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -35,12 +40,20 @@ func main() {
 		log.Error("database config", "err", err)
 		os.Exit(1)
 	}
-	defer pool.Close()
+	st := store.New(pool)
+
+	var migrated, draining atomic.Bool
+	m := metrics.New()
+	m.Register(metrics.NewSeatCollector(st), metrics.NewPoolCollector(st))
+	m.RegisterReady(func() bool { return migrated.Load() && !draining.Load() })
+	auditor := audit.NewRunner(st, m, log, cfg.AuditInterval)
 
 	// HTTP comes up immediately so /livez answers during a cold start; /readyz
 	// and the API stay 503 until the database is reachable and migrated.
-	var ready atomic.Bool
+	var background sync.WaitGroup
+	background.Add(1)
 	go func() {
+		defer background.Done()
 		if err := store.WaitForDB(ctx, pool, log); err != nil {
 			return // shutting down
 		}
@@ -58,17 +71,24 @@ func main() {
 			}
 			backoff = min(backoff*2, 30*time.Second)
 		}
-		ready.Store(true)
+		migrated.Store(true)
 		log.Info("ready")
+		auditor.Run(ctx) // until shutdown
 	}()
 
-	api := httpapi.New(store.New(pool), auth.New(cfg.JWTSecret, cfg.AdminAPIKey, cfg.TokenTTL), ready.Load)
+	api := httpapi.New(httpapi.Deps{
+		Store:    st,
+		Auth:     auth.New(cfg.JWTSecret, cfg.AdminAPIKey, cfg.TokenTTL),
+		Metrics:  m,
+		Migrated: migrated.Load,
+		Draining: draining.Load,
+	})
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           api.Handler(log),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -81,11 +101,27 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	log.Info("shutting down")
+	stop() // a second signal now kills the process immediately
+
+	// Shutdown, in order: stop advertising readiness, keep serving while
+	// traffic moves away, finish in-flight requests, then close the database.
+	draining.Store(true)
+	log.Info("shutdown 1/4: signal received, /readyz now 503", "drain_delay", cfg.DrainDelay.String(), "in_flight", m.InFlight())
+	time.Sleep(cfg.DrainDelay)
+
+	log.Info("shutdown 2/4: closing listener, draining in-flight requests", "in_flight", m.InFlight(), "timeout", cfg.ShutdownTimeout.String())
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
+	exitCode := 0
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown", "err", err)
-		os.Exit(1)
+		log.Error("shutdown: in-flight requests did not finish in time", "err", err, "in_flight", m.InFlight())
+		exitCode = 1
+	} else {
+		log.Info("shutdown 3/4: http drained", "in_flight", m.InFlight())
 	}
+
+	background.Wait() // migration/audit goroutine exits on ctx
+	pool.Close()
+	log.Info("shutdown 4/4: database pool closed; exiting")
+	os.Exit(exitCode)
 }

@@ -60,7 +60,20 @@ _TODO_
 
 ## Observability: what pages at 2am
 
-_TODO_
+Every request writes exactly one JSON log line, carrying `request_id` (also returned as `X-Request-ID`), `user_id`, the booking `outcome`, `error_code`, status and latency. Every reserve response moves exactly one outcome counter: `reservations_confirmed_total` or `reservations_declined_total{reason}`. That's guaranteed because one middleware does all the counting after the response is written, including for auth failures, bad input and panics. Seat gauges are read from the database at scrape time using the same expiry rule as `GET /shows`, so they reconcile with the API by construction rather than by careful bookkeeping.
+
+An **auditor** re-checks the invariants every `AUDIT_INTERVAL` in one consistent snapshot. Its checks are written independently of the reserve code. It verifies that seat rows equal `total_seats`, that every live reservation owns all its seats, that every occupied seat is backed by its owner's live reservation, that hold expiries agree, and that no user is over the limit. The results go to `audit_mismatches{check}`. I verified it by corrupting a seat's owner in the database by hand: the next run reported `orphan_occupied_seat=1, reservation_missing_seats=1` and logged the exact seat and reservation. An integration test does the same on every run, and the suite ends with a whole-database audit that fails the run on any mismatch.
+
+**Page (wake someone up):**
+- `audit_mismatches > 0` for any check. That is a correctness bug or data corruption, possibly a double-sell. This is the one alert that matters most.
+- 5xx rate above zero on the reserve route (`http_requests_total{code=~"5.."}`). Declines are designed to be 4xx, so any 5xx means something is broken.
+- `/readyz` failing or `app_ready == 0` for more than a minute, or `seats_scrape_success == 0`. The database is unreachable.
+- `db_tx_retries_total` increasing. The lock order is supposed to make deadlocks impossible, so a retry means that reasoning has been broken by a code change.
+
+**Ticket (look in the morning):**
+- `audit_errors_total` increasing, meaning the auditor itself can't run.
+- Reserve p99 latency high together with `db_pool_empty_acquires_total` climbing. The pool is saturated, so add connections or capacity.
+- An unusual mix in `reservations_declined_total`. For example, a jump in `unauthenticated` or `idempotency-conflict` usually points to a broken client release.
 
 ## AI usage
 

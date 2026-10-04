@@ -98,8 +98,7 @@ func (s *Store) GetShow(ctx context.Context, id int64) (Show, []Seat, SeatCounts
 		}
 
 		rows, err := tx.Query(ctx, `
-			SELECT label,
-			       CASE WHEN status = 'held' AND held_until <= now() THEN 'available' ELSE status END
+			SELECT label, `+effectiveSeatStatus+`
 			FROM seats WHERE show_id = $1 ORDER BY seat_no`, id)
 		if err != nil {
 			return err
@@ -123,6 +122,42 @@ func (s *Store) GetShow(ctx context.Context, id int64) (Show, []Seat, SeatCounts
 		return rows.Err()
 	})
 	return show, seats, counts, err
+}
+
+// effectiveSeatStatus is the one definition of a seat's status as the API and
+// metrics report it: a hold past held_until counts as available. GetShow and
+// SeatCountsByShow both use it, which is why the gauges can't disagree with
+// GET /shows.
+const effectiveSeatStatus = `CASE WHEN status = 'held' AND held_until <= now() THEN 'available' ELSE status END`
+
+type ShowSeatCounts struct {
+	ShowID int64
+	Total  int
+	SeatCounts
+}
+
+// SeatCountsByShow feeds the seat gauges. One statement, so one snapshot:
+// a scrape never sees half of a reservation.
+func (s *Store) SeatCountsByShow(ctx context.Context) ([]ShowSeatCounts, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT sh.id, sh.total_seats,
+		       count(*) FILTER (WHERE st.status = 'available'),
+		       count(*) FILTER (WHERE st.status = 'held'),
+		       count(*) FILTER (WHERE st.status = 'confirmed')
+		FROM shows sh
+		LEFT JOIN LATERAL (
+		    SELECT `+effectiveSeatStatus+` AS status FROM seats WHERE seats.show_id = sh.id
+		) st ON true
+		GROUP BY sh.id, sh.total_seats
+		ORDER BY sh.id`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (ShowSeatCounts, error) {
+		var c ShowSeatCounts
+		err := row.Scan(&c.ShowID, &c.Total, &c.Available, &c.Held, &c.Confirmed)
+		return c, err
+	})
 }
 
 // SeatLabel turns a 1-based seat number into a row-letter + column label:

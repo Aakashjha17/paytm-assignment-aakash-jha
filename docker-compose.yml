@@ -23,6 +23,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-please}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me-please}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      AUDIT_INTERVAL: ${AUDIT_INTERVAL:-10s}
+      DRAIN_DELAY: ${DRAIN_DELAY:-2s}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-10s}
+    # Must exceed DRAIN_DELAY + SHUTDOWN_TIMEOUT, or Docker SIGKILLs mid-drain.
+    stop_grace_period: 20s
     ports:
       - "8080:8080"
     depends_on:

@@ -26,3 +26,11 @@ The tool is Claude Code (Claude Opus). Each entry records what I directed, what 
 - **AI produced:** `reserve_seats` / `cancel_reservation` plpgsql functions with a global lock order (idempotency key → per-(show,user) advisory lock → seats `FOR UPDATE ORDER BY seat_no`); key stored on the reservation row with a fingerprint; declined attempts delete their row so keys aren't burned; lazy expiry; retry-on-40P01/40001 with a counter the tests assert stays 0; an invariant oracle (`checkConsistency`) used by every test; a negative control (random lock order → test fails).
 - **Bugs found while running tests:** three were in the tests (seat labels beyond a row's width); none in the SQL. Also found a local Postgres on :5432 shadowing compose — moved compose DB to host port 55432.
 - **Decided / reviewed by me:** _fill in — e.g. outcome→status choices (409 vs 422), expired-cancel returns 409, open /tokens_
+
+## 2026-10-04 — Phase 4: observability
+
+- **Directed:** asked for Prometheus metrics with exactly one outcome counter per response, DB-derived seat gauges + pool stats, an auditor exporting a mismatch gauge, and graceful shutdown (readiness 503 → drain → pool close).
+- **AI produced:** all outcome counting in the single observe middleware (reason from the booking outcome table, or the error code for pre-decision failures); seat gauges as a scrape-time collector sharing one SQL expiry expression with GET /shows; auditor with 5 invariant checks in one REPEATABLE READ snapshot; split `migrated` vs `draining` so /readyz goes 503 during drain while requests are still served; tests for metric/API reconciliation and audit-detects-corruption, plus a final whole-DB audit after every integration run.
+- **Verified by hand:** gauges matched GET /shows after a storm; corrupting a seat's owner in the local DB flipped `orphan_occupied_seat` and `reservation_missing_seats` to 1 with the seat/reservation logged, back to 0 after repair; `docker compose stop app` with a request blocked on a row lock logged shutdown 1/4 → 4/4 and the request completed with 201.
+- **Bugs found:** test seat-layout mistakes again (my test fixtures, not the service); /readyz 503 during drain was logged at ERROR (would have paged) → now WARN.
+- **Decided / reviewed by me:** _fill in_

@@ -12,10 +12,15 @@ func (a *API) livez(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// readyz says the service can do useful work right now: migrations have
-// finished and the database answers a ping. Anything else is 503 (fail closed).
+// readyz says the service should receive traffic right now: not shutting
+// down, migrations finished, and the database answers a ping. Anything else
+// is 503 (fail closed).
 func (a *API) readyz(w http.ResponseWriter, r *http.Request) {
-	if !a.ready() {
+	if a.draining() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+		return
+	}
+	if !a.migrated() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "starting", "database": "not_migrated"})
 		return
 	}
