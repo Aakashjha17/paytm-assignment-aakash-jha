@@ -20,6 +20,9 @@ services:
     environment:
       PORT: 8080
       DATABASE_URL: postgres://postgres:postgres@db:5432/seats?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-please}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me-please}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "8080:8080"
     depends_on:

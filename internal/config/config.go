@@ -1,34 +1,62 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 )
 
-// Config is everything the server reads from the environment. Later phases
-// add DB, auth and limits here; for now it only needs to know where to listen.
+// Config is everything the server reads from the environment.
 type Config struct {
 	Port            int
 	DatabaseURL     string
+	DBMaxConns      int32
+	JWTSecret       string
+	AdminAPIKey     string
+	TokenTTL        time.Duration
+	LogLevel        string
 	ShutdownTimeout time.Duration
 }
 
 func Load() (Config, error) {
+	var errs []error
 	port, err := intEnv("PORT", 8080)
-	if err != nil {
-		return Config{}, err
-	}
+	errs = append(errs, err)
+	maxConns, err := intEnv("DB_MAX_CONNS", 20)
+	errs = append(errs, err)
+	tokenTTL, err := durationEnv("TOKEN_TTL", 24*time.Hour)
+	errs = append(errs, err)
 	shutdown, err := durationEnv("SHUTDOWN_TIMEOUT", 10*time.Second)
-	if err != nil {
-		return Config{}, err
-	}
-	return Config{
+	errs = append(errs, err)
+
+	cfg := Config{
 		Port:            port,
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
+		DBMaxConns:      int32(maxConns),
+		JWTSecret:       os.Getenv("JWT_SECRET"),
+		AdminAPIKey:     os.Getenv("ADMIN_API_KEY"),
+		TokenTTL:        tokenTTL,
+		LogLevel:        os.Getenv("LOG_LEVEL"),
 		ShutdownTimeout: shutdown,
-	}, nil
+	}
+
+	// Fail closed: no default secrets, so a misconfigured deploy refuses to start
+	// rather than silently accepting tokens signed with a well-known key.
+	if cfg.DatabaseURL == "" {
+		errs = append(errs, errors.New("DATABASE_URL is required"))
+	}
+	if len(cfg.JWTSecret) < 16 {
+		errs = append(errs, errors.New("JWT_SECRET must be at least 16 characters"))
+	}
+	if len(cfg.AdminAPIKey) < 16 {
+		errs = append(errs, errors.New("ADMIN_API_KEY must be at least 16 characters"))
+	}
+	if cfg.DBMaxConns < 1 {
+		errs = append(errs, errors.New("DB_MAX_CONNS must be >= 1"))
+	}
+	return cfg, errors.Join(errs...)
 }
 
 func intEnv(key string, def int) (int, error) {
