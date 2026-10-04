@@ -109,7 +109,16 @@ func (e *env) mintTokens(ctx context.Context, n int) error {
 	var firstErr atomic.Value
 	parallel(n, e.cfg.concurrency, func(i int) {
 		e.users[i] = fmt.Sprintf("burst-%s-%d", e.run, i)
-		r := e.c.do(ctx, "POST", "/tokens", nil, map[string]any{"user_id": e.users[i]})
+		// Setup, not measurement: minting is side-effect free, so a request
+		// lost in transit (seen once at a live edge) is simply retried. The
+		// measured reserve/cancel requests are never retried.
+		var r response
+		for attempt := 0; attempt < 3; attempt++ {
+			r = e.c.do(ctx, "POST", "/tokens", nil, map[string]any{"user_id": e.users[i]})
+			if r.Err == nil && r.Status < 500 {
+				break
+			}
+		}
 		if r.Err != nil || r.Status != 201 {
 			firstErr.CompareAndSwap(nil, fmt.Errorf("mint token: %d %v %s", r.Status, r.Err, r.Raw))
 			return
