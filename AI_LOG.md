@@ -34,3 +34,11 @@ The tool is Claude Code (Claude Opus). Each entry records what I directed, what 
 - **Verified by hand:** gauges matched GET /shows after a storm; corrupting a seat's owner in the local DB flipped `orphan_occupied_seat` and `reservation_missing_seats` to 1 with the seat/reservation logged, back to 0 after repair; `docker compose stop app` with a request blocked on a row lock logged shutdown 1/4 → 4/4 and the request completed with 201.
 - **Bugs found:** test seat-layout mistakes again (my test fixtures, not the service); /readyz 503 during drain was logged at ERROR (would have paged) → now WARN.
 - **Decided / reviewed by me:** _fill in_
+
+## 2026-10-04 — Phase 5: burst tool and hardening
+
+- **Directed:** asked for cmd/burst + burst.sh + make burst, built in layers (hot-seat storm → mixed workload → mid-burst poller → final reconciliation with non-zero exit), then ops checks.
+- **AI produced:** the tool (public API + /metrics only, so it runs unchanged against local or live), a 6-kind workload, 13 checks, `make watch` for recording.
+- **What the burst caught:** the metric reason for same-key-different-body was `idempotency-conflict` while the error code was `idempotency_key_reused` (same drift for two cancel outcomes) — the counter-vs-client reconciliation failed on it. Fixed by making every decline's reason equal its code, with a unit test enforcing it.
+- **Ops checks found:** with the DB down the API answered `500 internal` — indistinguishable from a bug. Now `503 database_unavailable` + `Retry-After`, counted under its own reason.
+- **Decided / reviewed by me:** _fill in — live tuning (pool size/timeouts) and the live run results_

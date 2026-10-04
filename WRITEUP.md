@@ -73,7 +73,7 @@ An **auditor** re-checks the invariants every `AUDIT_INTERVAL` in one consistent
 **Ticket (look in the morning):**
 - `audit_errors_total` increasing, meaning the auditor itself can't run.
 - Reserve p99 latency high together with `db_pool_empty_acquires_total` climbing. The pool is saturated, so add connections or capacity.
-- An unusual mix in `reservations_declined_total`. For example, a jump in `unauthenticated` or `idempotency-conflict` usually points to a broken client release.
+- An unusual mix in `reservations_declined_total`. For example, a jump in `unauthenticated` or `idempotency-key-reused` usually points to a broken client release.
 
 ## AI usage
 
