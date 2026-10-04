@@ -52,11 +52,34 @@ ON CONFLICT (user_id, idempotency_key) DO NOTHING RETURNING id;
 
 ## Holds & expiry
 
-_TODO_
+A successful reserve creates a **hold**, not a sale. The show defines the TTL (`hold_ttl_seconds`, default 300s, allowed 10–3600s). In the same transaction, the reservation gets `expires_at` and every one of its seats gets the identical `held_until`. The auditor checks the two never drift (`hold_expiry_mismatch`).
+
+**Expiry is lazy: no job has to run for a hold to lapse.** Everywhere a seat's state matters, a hold past its time counts as available:
+- the reserve decision (step 3 treats `held` with `held_until <= now()` as free)
+- the per-user limit count (only live holds count)
+- `GET /shows`, the seat gauges and the auditor
+
+All of them use one SQL expression (`effectiveSeatStatus`), so they can't disagree. A sweeper would add a moving part that can lag or crash. Lazy expiry is exact at every read.
+
+**Consequences:**
+- **One clock.** Every expiry decision uses the database's `now()`, never the app's clock, so app instances with skewed clocks can't disagree. Inside a transaction `now()` is the transaction's start time. A request that waited on a lock may see a hold as still live a moment after it expired, which only errs toward declining (`seat_taken`), never toward double-selling.
+- **Re-selling an expired seat** overwrites the stale owner in the same locked update. Cancelling an expired hold returns `409 reservation_expired` and writes nothing, so a late cancel can't release a seat that has since gone to someone else (covered by `TestExpiredHold`).
+- **Stale rows remain.** An expired reservation stays `status='held'` in its table and is *reported* as `expired`. The seat row keeps the old owner until someone takes it. This is harmless, because every reader applies the expiry rule, but it is untidy (see *What I'd do next*).
+- **No confirm step yet.** `confirmed` exists in the schema, the state machine and the counts, but no endpoint moves a hold to confirmed, because payment isn't in scope. One would take the per-user lock, then the reservation row, then its seats in `seat_no` order (the same lock order as cancel), and refuse if `expires_at <= now()`.
 
 ## Consistency vs availability under a partition
 
-_TODO_
+**This system chooses consistency.** There is one source of truth, the Postgres primary, and every decision is a single transaction on it. When the app can't reach the database (a partition, a failover or an outage), it refuses rather than guesses:
+- reserve and cancel return `503 database_unavailable` with `Retry-After`
+- `GET /shows` also returns 503 rather than serving a possibly stale seat map
+- `/readyz` fails closed, so a load balancer stops sending traffic
+- `/livez` stays 200, so the orchestrator doesn't restart a healthy process for a database problem
+
+There is no cache, local queue or "accept now, reconcile later" path that could sell a seat twice. For an on-sale, a double-sold seat is far worse than a few seconds of 503s.
+
+**What makes this survivable for clients is idempotency.** The bad case in a partition is "I don't know if it worked": the commit succeeded but the response was lost. The client retries with the same `Idempotency-Key`. If the first attempt committed, the retry replays it (200). If it didn't, the retry runs it. Either way the result is exactly once, and the client never has to guess.
+
+**If this had to scale out**, I'd keep the same choice and partition by show: all of a show's seats, reservations and per-user locks live on one database shard, so every decision is still local to one primary. Read replicas could serve browsing, as long as they're labelled as possibly stale and never used for a decision. Multi-primary or eventually consistent writes for seat inventory are exactly what this design avoids.
 
 ## Observability: what pages at 2am
 
@@ -77,8 +100,20 @@ An **auditor** re-checks the invariants every `AUDIT_INTERVAL` in one consistent
 
 ## AI usage
 
-See `AI_LOG.md` for the running log. _Summary TODO._
+The detailed log is in `AI_LOG.md`. In short:
+
+- **Directed by me:** the requirements and the phased plan, with explicit "done when" acceptance checks per phase (planned with the help of Claude chat). Also the stack (Go, Postgres, Railway), and the correctness constraints: the decision lives in the database, no read-then-write, deterministic lock order for multi-seat requests.
+- **Drafted by AI (Claude Code):** most of the code, tests and docs, to that plan. That includes the SQL functions and their lock order, the test harness and concurrency tests, the observability layer, and the burst tool.
+- **Done or decided by me:** the Railway deployment and configuration, including diagnosing the `DATABASE_URL` crash loop. Manual testing locally and live with curl and Postman. Running and judging the live bursts. Reviewing the implementation and the outcome choices.
+- **What running it caught:** several problems were found by executing, not by reading. A metric reason didn't match its error code; the burst's reconciliation caught it. A database outage surfaced as 500, now 503. The first live run hit stale deployed code. A test-fixture mistake. A random-lock-order control showed the deadlock test really catches deadlocks.
+
+The rule I held to: nothing counted as done because code existed. It counted when its acceptance check passed, locally and then live.
 
 ## What I'd do next
 
-_TODO_
+1. **Confirm/payment step:** `POST /reservations/{id}/confirm` with its own idempotency key, using cancel's lock order and refusing expired holds. Money stays integer paise end to end.
+2. **Expiry tidiness:** a low-priority sweeper that marks lapsed reservations `expired` and clears stale seat owners, plus an `holds_expired_total` counter. This isn't needed for correctness, but it keeps the tables and reports clean.
+3. **Throughput:** live `/metrics` shows latency is almost entirely waiting for one of 20 DB connections (about 20ms per decision means about 1,000 req/s). Next steps would be to raise `DB_MAX_CONNS` or put PgBouncer in front, and to fail fast on obviously sold-out hot seats before queuing for the lock.
+4. **Real identity and abuse controls:** replace the open `POST /tokens` (a stand-in for an identity provider) with real auth; add per-user and per-IP rate limits; rotate secrets.
+5. **Ops as code:** a Prometheus + Grafana setup with the 2am alert rules above checked into the repo; logs shipped to a searchable store; CI running unit tests plus the race-detector integration suite on every PR.
+6. **Retention:** expire old idempotency keys and reservations after a window (e.g. 24h past the show), and add `GET /reservations/{id}` for clients.
