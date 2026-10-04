@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -53,6 +56,23 @@ func WaitForDB(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) error 
 		}
 		backoff = min(backoff*2, 5*time.Second)
 	}
+}
+
+// IsUnavailable reports whether err means the database couldn't be reached
+// (as opposed to a query or logic error), so callers can answer 503 with
+// Retry-After instead of a generic 500.
+func IsUnavailable(err error) bool {
+	var connErr *pgconn.ConnectError
+	if errors.As(err, &connErr) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		// Class 08: connection exception; 57P0x: server shutting down / starting.
+		return strings.HasPrefix(pgErr.Code, "08") || strings.HasPrefix(pgErr.Code, "57P0")
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
 
 // PoolStat exposes connection-pool counters for metrics.

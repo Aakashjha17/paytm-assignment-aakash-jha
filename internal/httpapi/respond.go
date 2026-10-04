@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+
+	"seat-reservation/internal/store"
 )
 
 type errorBody struct {
@@ -43,9 +45,16 @@ func writeErrorDetails(w http.ResponseWriter, r *http.Request, status int, code,
 
 // internalError records err on the request's access-log line (the single log
 // line for this request) and returns an opaque 500 to the client.
+// A database outage is reported as 503 database_unavailable with Retry-After,
+// so clients back off and dashboards can tell a dependency outage from a bug.
 func internalError(w http.ResponseWriter, r *http.Request, err error) {
 	if st := stateFrom(r.Context()); st != nil {
 		st.err = err
+	}
+	if store.IsUnavailable(err) {
+		w.Header().Set("Retry-After", "2")
+		writeError(w, r, http.StatusServiceUnavailable, "database_unavailable", "database unavailable, retry shortly")
+		return
 	}
 	writeError(w, r, http.StatusInternalServerError, "internal", "internal error")
 }
